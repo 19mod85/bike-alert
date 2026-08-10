@@ -46,7 +46,7 @@ def load_state():
     if STATE_FILE.exists():
         try:
             data = json.loads(STATE_FILE.read_text())
-            if isinstance(data, list):  # Kompatybilność wsteczna ze starszym formatem
+            if isinstance(data, list):
                 return {"seen_bikes": data}
             return data
         except Exception:
@@ -85,15 +85,14 @@ async def collect_bikes(page, country, url):
         print(f"Sprawdzam kraj: {country}...")
         await page.goto(url, wait_until="domcontentloaded", timeout=60000)
         
-        # Obsługa wyskakujących ciasteczek
+        # Obsługa ciasteczek
         await accept_cookies(page)
         
-        # Przewijanie strony w dół, aby wymusić załadowanie elementów (lazy loading)
+        # Przewijanie strony, aby wymusić lazy loading
         for _ in range(3):
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await page.wait_for_timeout(1500)
 
-        # Elastyczne selektory dla kart produktów Canyon
         product_selectors = [
             ".productGrid__item",
             ".product-tile",
@@ -139,9 +138,33 @@ async def collect_bikes(page, country, url):
                     lines = [l.strip() for l in text.split("\n") if l.strip()]
                     title = lines[0] if lines else f"Canyon {country}"
                     
+                    # Próba wyciągnięcia ceny
+                    price = "Brak ceny"
+                    price_selectors = [
+                        ".product-tile__price", 
+                        ".price", 
+                        ".price__regular", 
+                        ".product-price",
+                        "span[class*='price']"
+                    ]
+                    for p_sel in price_selectors:
+                        p_elem = card.locator(p_sel).first
+                        if await p_elem.count() > 0:
+                            p_text = await p_elem.inner_text()
+                            if p_text.strip():
+                                price = p_text.strip().replace("\n", " ")
+                                break
+                    
+                    # Awaryjne wyciąganie ceny przez Regex, jeśli selektory zawiodły
+                    if price == "Brak ceny":
+                        price_match = re.search(r'([\d\s,\.]+\s*(?:zł|PLN|€|EUR|£|GBP))', text, re.IGNORECASE)
+                        if price_match:
+                            price = price_match.group(1).strip()
+
                     found.append({
                         "country": country,
                         "title": title,
+                        "price": price,
                         "url": href,
                     })
             except Exception:
@@ -170,7 +193,6 @@ async def main():
         for country, url in COUNTRIES.items():
             bikes = await collect_bikes(page, country, url)
             for bike in bikes:
-                # Generowanie unikalnego hasha na podstawie URL konkretnego roweru
                 bike_id = hashlib.md5(bike["url"].encode()).hexdigest()
                 
                 if bike_id not in seen_bikes:
@@ -178,14 +200,13 @@ async def main():
                     all_new_bikes.append(bike)
                     
                     title = f"Rowerowa okazja! ({bike['country']})"
-                    message = f"Model: {bike['title']}\nKraj: {bike['country']}"
+                    message = f"Model: {bike['title']}\nCena: {bike['price']}\nKraj: {bike['country']}"
                     send_ntfy_notification(title, message, bike["url"])
             
             await asyncio.sleep(2)
 
         await browser.close()
         
-        # Zapis zaktualizowanego stanu
         state["seen_bikes"] = list(seen_bikes)
         save_state(state)
         
