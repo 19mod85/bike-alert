@@ -8,7 +8,7 @@ from urllib.parse import urlparse, urlunparse
 import requests
 from playwright.async_api import async_playwright
 
-# Konfiguracja - wszystkie kraje używają teraz spójnych filtrów z Niemiec
+# Konfiguracja
 GERMAN_FILTERS = "?prefn1=pc_familie&prefn2=pc_rahmengroesse&prefv1=Endurace%7CEndurace%3AON%7CAeroad%7CUltimate%7CSpeedmax%7CInflite&prefv2=L&searchType=bikes&srule=sort_price_ascending"
 
 COUNTRIES = {
@@ -108,46 +108,60 @@ async def collect_bikes(page, country, url):
             await page.evaluate("window.scrollBy(0, document.body.scrollHeight / 3)")
             await page.wait_for_timeout(1000)
 
-        product_selectors = [
-            ".productGrid__item",
-            ".product-tile",
-            "div.grid-product",
-            "li.product-grid__item",
-            "div[class*='productGrid']",
-            "div[class*='product-tile']",
-            "article.product"
-        ]
-        
-        cards = []
-        for sel in product_selectors:
-            cards = await page.locator(sel).all()
-            if cards:
-                break
+        # Pobieranie wszystkich danych produktów za pomocą bezpiecznego kodu JS w przeglądarce
+        products_data = await page.evaluate("""() => {
+            const items = [];
+            const selectors = [
+                '.productGrid__item',
+                '.product-tile',
+                'div.grid-product',
+                'li.product-grid__item',
+                'div[class*="productGrid"]',
+                'div[class*="product-tile"]',
+                'article.product'
+            ];
+            
+            let cards = [];
+            for (const sel of selectors) {
+                cards = document.querySelectorAll(sel);
+                if (cards.length > 0) break;
+            }
+            
+            if (cards.length === 0) {
+                cards = document.querySelectorAll("a[href*='/p/'], a[href*='/rowery/'], a[href*='/fahrrad/'], a[href*='/bici/'], a[href*='/bicicletas/']");
+            }
+            
+            cards.forEach(card => {
+                let link = card.tagName.toLowerCase() === 'a' ? card : card.querySelector('a');
+                let href = link ? link.getAttribute('href') : null;
+                let text = card.innerText || '';
                 
-        if not cards:
-            cards = await page.locator("a[href*='/p/'], a[href*='/rowery/'], a[href*='/fahrrad/'], a[href*='/bici/'], a[href*='/bicicletas/']").all()
+                let priceEl = card.querySelector('.product-tile__price, .price, .price__regular, .product-price, span[class*="price"]');
+                let priceText = priceEl ? priceEl.innerText : '';
+                
+                if (href) {
+                    items.push({ href, text, priceText });
+                }
+            });
+            
+            return items;
+        }""")
 
-        print(f"Znaleziono elementów w kategorii {country}: {len(cards)}")
+        print(f"Znaleziono elementów w kategorii {country}: {len(products_data)}")
 
-        for card in cards:
+        for item in products_data:
             try:
-                tag_name = await card.evaluate("el => el.tagName.toLowerCase()")
-                
-                if tag_name == "a":
-                    href = await card.get_attribute("href")
-                    text = await card.inner_text()
-                else:
-                    link_elem = card.locator("a").first
-                    if await link_elem.count() == 0:
-                        continue
-                    href = await link_elem.get_attribute("href")
-                    text = await card.inner_text()
+                href = item["href"]
+                text = item["text"]
+                price_text = item["priceText"]
 
                 if not href:
                     continue
                     
                 if href.startswith("/"):
                     href = f"https://www.canyon.com{href}"
+                elif not href.startswith("http"):
+                    continue
 
                 # Czyszczenie URL w celu eliminacji parametrów śledzących
                 href = clean_url(href)
@@ -161,22 +175,9 @@ async def collect_bikes(page, country, url):
                     title = lines[0] if lines else f"Canyon {country}"
                     
                     price = "Brak ceny"
-                    price_selectors = [
-                        ".product-tile__price", 
-                        ".price", 
-                        ".price__regular", 
-                        ".product-price",
-                        "span[class*='price']"
-                    ]
-                    for p_sel in price_selectors:
-                        p_elem = card.locator(p_sel).first
-                        if await p_elem.count() > 0:
-                            p_text = await p_elem.inner_text()
-                            if p_text.strip():
-                                price = p_text.strip().replace("\n", " ")
-                                break
-                    
-                    if price == "Brak ceny":
+                    if price_text.strip():
+                        price = price_text.strip().replace("\n", " ")
+                    else:
                         price_match = re.search(r'([\d\s,\.]+\s*(?:zł|PLN|€|EUR|£|GBP))', text, re.IGNORECASE)
                         if price_match:
                             price = price_match.group(1).strip()
@@ -224,7 +225,6 @@ async def main():
         for country, url in COUNTRIES.items():
             bikes = await collect_bikes(page, country, url)
             for bike in bikes:
-                # Użycie hasha ze znormalizowanego (czystego) URL
                 bike_id = hashlib.md5(bike["url"].encode()).hexdigest()
                 
                 if bike_id not in seen_bikes:
