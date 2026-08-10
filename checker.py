@@ -45,96 +45,151 @@ def send_ntfy_notification(title, message, click_url):
 def load_state():
     if STATE_FILE.exists():
         try:
-            return json.loads(STATE_FILE.read_text())
+            data = json.loads(STATE_FILE.read_text())
+            if isinstance(data, list):  # Kompatybilność wsteczna ze starszym formatem
+                return {"seen_bikes": data}
+            return data
         except Exception:
-            return {}
-    return {}
+            return {"seen_bikes": []}
+    return {"seen_bikes": []}
 
 
 def save_state(state):
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2))
 
 
+async def accept_cookies(page):
+    """Próbuje zamknąć baner cookies w różnych wersjach językowych."""
+    cookie_selectors = [
+        "button[data-cookieconsent='accept']",
+        ".cookie-banner__button--accept",
+        "button:has-text('Accept')",
+        "button:has-text('Akceptuj')",
+        "button:has-text('Alle akzeptieren')",
+        "#js-cookie-banner-accept",
+    ]
+    for selector in cookie_selectors:
+        try:
+            btn = page.locator(selector).first
+            if await btn.is_visible(timeout=2000):
+                await btn.click()
+                await page.wait_for_timeout(1000)
+                break
+        except Exception:
+            continue
+
+
 async def collect_bikes(page, country, url):
     found = []
     try:
+        print(f"Sprawdzam kraj: {country}...")
         await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(2000)
+        
+        # Obsługa wyskakujących ciasteczek
+        await accept_cookies(page)
+        
+        # Przewijanie strony w dół, aby wymusić załadowanie elementów (lazy loading)
+        for _ in range(3):
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(1500)
 
-        # Odrzucenie cookies
-        for btn in ['button:has-text("Accept")', 'button:has-text("Akceptuję")']:
-            try:
-                await page.locator(btn).first.click(timeout=1000)
+        # Elastyczne selektory dla kart produktów Canyon
+        product_selectors = [
+            ".productGrid__item",
+            ".product-tile",
+            "div.grid-product",
+            "li.product-grid__item"
+        ]
+        
+        cards = []
+        for sel in product_selectors:
+            cards = await page.locator(sel).all()
+            if cards:
                 break
+                
+        if not cards:
+            cards = await page.locator("a.product-tile__link, a.js-product-tile-link").all()
+
+        print(f"Znaleziono elementów w kategorii {country}: {len(cards)}")
+
+        for card in cards:
+            try:
+                text = await card.inner_text()
+                
+                # Wyciąganie linku do produktu
+                link_elem = card.locator("a").first
+                href = await link_elem.get_attribute("href") if await link_elem.count() > 0 else None
+                
+                if not href and await card.evaluate("el => el.tagName.toLowerCase()") == "a":
+                    href = await card.get_attribute("href")
+
+                if not href:
+                    continue
+                    
+                if href.startswith("/"):
+                    href = f"https://www.canyon.com{href}"
+
+                text_lower = text.lower()
+
+                # Sprawdzenie dopasowania modeli oraz słów kluczowych
+                model_matched = any(model in text_lower for model in TARGET_MODELS)
+                keyword_matched = any(kw in text_lower for kw in REQUIRED_KEYWORDS)
+
+                if model_matched and keyword_matched:
+                    lines = [l.strip() for l in text.split("\n") if l.strip()]
+                    title = lines[0] if lines else f"Canyon {country}"
+                    
+                    found.append({
+                        "country": country,
+                        "title": title,
+                        "url": href,
+                    })
             except Exception:
-                pass
-
-        # Przewijanie dla lazy loading
-        for _ in range(4):
-            await page.mouse.wheel(0, 1500)
-            await page.wait_for_timeout(500)
-
-        # Pobranie linków do produktów
-        cards = page.locator('a[href*="/outlet-"]')
-        count = await cards.count()
-
-        for i in range(count):
-            card = cards.nth(i)
-            href = await card.get_attribute("href")
-            text = (await card.inner_text()).lower()
-
-            if not href or not text:
                 continue
 
-            matches_model = any(m in text for m in TARGET_MODELS)
-            has_di2 = any(k in text for k in REQUIRED_KEYWORDS)
-
-            if matches_model and has_di2:
-                full_url = href if href.startswith("http") else f"https://www.canyon.com{href}"
-                
-                # Wyciągnięcie ceny z tekstu kafelka
-                price_match = re.search(r'([\d\s.,]+)\s*(zł|€|£|PLN|EUR|GBP)', text, re.I)
-                price_str = price_match.group(0) if price_match else "Brak ceny"
-
-                found.append({
-                    "country": country,
-                    "url": full_url,
-                    "title": text.split("\n")[0].upper(),
-                    "price": price_str,
-                    "hash": hashlib.sha1(full_url.encode()).hexdigest()
-                })
     except Exception as e:
-        print(f"Błąd skanowania {country}: {e}")
-
+        print(f"Błąd podczas pobierania {country}: {e}")
+        
     return found
 
 
 async def main():
     state = load_state()
-    new_state = {}
-
+    seen_bikes = set(state.get("seen_bikes", []))
+    
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page(viewport={"width": 1280, "height": 800})
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 800}
+        )
+        page = await context.new_page()
+
+        all_new_bikes = []
 
         for country, url in COUNTRIES.items():
-            print(f"Sprawdzam: {country}...")
             bikes = await collect_bikes(page, country, url)
-
             for bike in bikes:
-                h = bike["hash"]
-                new_state[h] = bike
-
-                # Wyślij powiadomienie tylko jeśli oferta jest nowa
-                if h not in state:
-                    title = f"🆕 OKAZJA Canyon ({bike['country']})!"
-                    msg = f"Model: {bike['title']}\nCena: {bike['price']}"
-                    send_ntfy_notification(title, msg, bike["url"])
+                # Generowanie unikalnego hasha na podstawie URL konkretnego roweru
+                bike_id = hashlib.md5(bike["url"].encode()).hexdigest()
+                
+                if bike_id not in seen_bikes:
+                    seen_bikes.add(bike_id)
+                    all_new_bikes.append(bike)
+                    
+                    title = f"Rowerowa okazja! ({bike['country']})"
+                    message = f"Model: {bike['title']}\nKraj: {bike['country']}"
+                    send_ntfy_notification(title, message, bike["url"])
+            
+            await asyncio.sleep(2)
 
         await browser.close()
-
-    save_state(new_state)
-
+        
+        # Zapis zaktualizowanego stanu
+        state["seen_bikes"] = list(seen_bikes)
+        save_state(state)
+        
+        print(f"Zakończono. Znaleziono nowych okazji: {len(all_new_bikes)}")
 
 if __name__ == "__main__":
     asyncio.run(main())
