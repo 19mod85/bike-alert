@@ -9,10 +9,10 @@ from playwright.async_api import async_playwright
 
 # Konfiguracja
 COUNTRIES = {
-    "Polska": "https://www.canyon.com/pl-pl/outlet-rowery/szosa/",
-    "Niemcy": "https://www.canyon.com/de-de/outlet-fahrrader/rennrad/",
-    "Wielka Brytania": "https://www.canyon.com/en-gb/outlet-bikes/road-bikes/",
-    "Francja": "https://www.canyon.com/fr-fr/outlet-velos/route/",
+    "Polska": "https://www.canyon.com/pl-pl/rowery-wyprzedaz/?prefn1=pc_rahmengroesse&prefn2=pc_welt&prefv1=L&prefv2=Szosa&searchType=bikes&srule=sort_price_ascending",
+    "Niemcy": "https://www.canyon.com/de-de/fahrrad-outlet/?prefn1=pc_familie&prefn2=pc_rahmengroesse&prefv1=Endurace%7CEndurace%3AON%7CAeroad%7CUltimate%7CSpeedmax%7CInflite&prefv2=L&searchType=bikes&srule=sort_price_ascending",
+    "Wielka Brytania": "https://www.canyon.com/en-gb/outlet-bikes/road-bikes/?prefn1=pc_rahmengroesse&prefv1=L&srule=sort_price_ascending",
+    "Francja": "https://www.canyon.com/fr-fr/promo-velos/?prefn1=pc_familie&prefn2=pc_rahmengroesse&prefv1=Endurace%7CEndurace%3AON%7CAeroad%7CUltimate%7CSpeedmax%7CInflite&prefv2=L&searchType=bikes&srule=sort_price_ascending",
 }
 
 TARGET_MODELS = ["cf 7", "cf 8"]
