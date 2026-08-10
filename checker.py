@@ -4,22 +4,31 @@ import json
 import os
 import re
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 import requests
 from playwright.async_api import async_playwright
 
-# Konfiguracja
+# Konfiguracja - wszystkie kraje używają teraz spójnych filtrów z Niemiec
+GERMAN_FILTERS = "?prefn1=pc_familie&prefn2=pc_rahmengroesse&prefv1=Endurace%7CEndurace%3AON%7CAeroad%7CUltimate%7CSpeedmax%7CInflite&prefv2=L&searchType=bikes&srule=sort_price_ascending"
+
 COUNTRIES = {
-    "Polska": "https://www.canyon.com/pl-pl/rowery-wyprzedaz/?prefn1=pc_rahmengroesse&prefn2=pc_welt&prefv1=L&prefv2=Szosa&searchType=bikes&srule=sort_price_ascending",
-    "Niemcy": "https://www.canyon.com/de-de/fahrrad-outlet/?prefn1=pc_familie&prefn2=pc_rahmengroesse&prefv1=Endurace%7CEndurace%3AON%7CAeroad%7CUltimate%7CSpeedmax%7CInflite&prefv2=L&searchType=bikes&srule=sort_price_ascending",
-    "Wielka Brytania": "https://www.canyon.com/en-gb/outlet-bikes/road-bikes/?prefn1=pc_rahmengroesse&prefv1=L&srule=sort_price_ascending",
-    "Francja": "https://www.canyon.com/fr-fr/promo-velos/?prefn1=pc_familie&prefn2=pc_rahmengroesse&prefv1=Endurace%7CEndurace%3AON%7CAeroad%7CUltimate%7CSpeedmax%7CInflite&prefv2=L&searchType=bikes&srule=sort_price_ascending",
-    "Włochy": "https://www.canyon.com/it-it/bici-outlet/bici-da-corsa/?prefn1=pc_rahmengroesse&prefv1=L&srule=sort_price_ascending",
-    "Hiszpania": "https://www.canyon.com/es-es/bicicletas-outlet/carretera/?prefn1=pc_rahmengroesse&prefv1=L&srule=sort_price_ascending",
+    "Polska": f"https://www.canyon.com/pl-pl/rowery-wyprzedaz/{GERMAN_FILTERS}",
+    "Niemcy": f"https://www.canyon.com/de-de/fahrrad-outlet/{GERMAN_FILTERS}",
+    "Wielka Brytania": f"https://www.canyon.com/en-gb/outlet-bikes/road-bikes/{GERMAN_FILTERS}",
+    "Francja": f"https://www.canyon.com/fr-fr/promo-velos/{GERMAN_FILTERS}",
+    "Włochy": f"https://www.canyon.com/it-it/bici-outlet/bici-da-corsa/{GERMAN_FILTERS}",
+    "Hiszpania": f"https://www.canyon.com/es-es/bicicletas-outlet/carretera/{GERMAN_FILTERS}",
 }
 
 TARGET_MODELS = ["cf 7", "cf 8"]
 REQUIRED_KEYWORDS = ["di2"]
 STATE_FILE = Path("canyon_state.json")
+
+
+def clean_url(url):
+    """Usuwa parametry śledzące i sesyjne z URL, aby stan był stabilny."""
+    parsed = urlparse(url)
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
 
 
 def send_ntfy_notification(title, message, click_url):
@@ -67,6 +76,8 @@ async def accept_cookies(page):
         "button:has-text('Accept')",
         "button:has-text('Akceptuj')",
         "button:has-text('Alle akzeptieren')",
+        "button:has-text('Accetta')",
+        "button:has-text('Aceptar')",
         "#js-cookie-banner-accept",
         "button.wt-cookie-consent-accept"
     ]
@@ -92,12 +103,11 @@ async def collect_bikes(page, country, url):
 
         await accept_cookies(page)
         
-        # Symulacja naturalnego ruchu i lazy loading
+        # Symulacja ruchu i lazy loading
         for _ in range(4):
             await page.evaluate("window.scrollBy(0, document.body.scrollHeight / 3)")
             await page.wait_for_timeout(1000)
 
-        # Rozbudowana lista selektorów kart produktów (uwzględniająca najnowsze zmiany w szablonach)
         product_selectors = [
             ".productGrid__item",
             ".product-tile",
@@ -112,19 +122,15 @@ async def collect_bikes(page, country, url):
         for sel in product_selectors:
             cards = await page.locator(sel).all()
             if cards:
-                print(f"Użyto selektora: {sel}")
                 break
                 
-        # Awaryjne pobieranie – jeśli selektory zawiodły, szukamy kontenerów z linkami do rowerów
         if not cards:
-            print(f"Brak dopasowań selektorów dla {country}, próbuję metody awaryjnej...")
-            cards = await page.locator("a[href*='/p/'], a[href*='/rowery/'], a[href*='/fahrrad/']").all()
+            cards = await page.locator("a[href*='/p/'], a[href*='/rowery/'], a[href*='/fahrrad/'], a[href*='/bici/'], a[href*='/bicicletas/']").all()
 
         print(f"Znaleziono elementów w kategorii {country}: {len(cards)}")
 
         for card in cards:
             try:
-                # Sprawdzenie czy element to bezpośrednio link czy kontener
                 tag_name = await card.evaluate("el => el.tagName.toLowerCase()")
                 
                 if tag_name == "a":
@@ -143,6 +149,8 @@ async def collect_bikes(page, country, url):
                 if href.startswith("/"):
                     href = f"https://www.canyon.com{href}"
 
+                # Czyszczenie URL w celu eliminacji parametrów śledzących
+                href = clean_url(href)
                 text_lower = text.lower()
 
                 model_matched = any(model in text_lower for model in TARGET_MODELS)
@@ -173,7 +181,6 @@ async def collect_bikes(page, country, url):
                         if price_match:
                             price = price_match.group(1).strip()
 
-                    # Unikanie duplikatów w obrębie jednej iteracji kraju
                     if not any(b["url"] == href for b in found):
                         found.append({
                             "country": country,
@@ -195,7 +202,6 @@ async def main():
     seen_bikes = set(state.get("seen_bikes", []))
     
     async with async_playwright() as p:
-        # Dodanie argumentów maskujących przeglądarkę przed wykryciem bota
         browser = await p.chromium.launch(
             headless=True,
             args=[
@@ -218,6 +224,7 @@ async def main():
         for country, url in COUNTRIES.items():
             bikes = await collect_bikes(page, country, url)
             for bike in bikes:
+                # Użycie hasha ze znormalizowanego (czystego) URL
                 bike_id = hashlib.md5(bike["url"].encode()).hexdigest()
                 
                 if bike_id not in seen_bikes:
