@@ -13,6 +13,8 @@ COUNTRIES = {
     "Niemcy": "https://www.canyon.com/de-de/fahrrad-outlet/?prefn1=pc_familie&prefn2=pc_rahmengroesse&prefv1=Endurace%7CEndurace%3AON%7CAeroad%7CUltimate%7CSpeedmax%7CInflite&prefv2=L&searchType=bikes&srule=sort_price_ascending",
     "Wielka Brytania": "https://www.canyon.com/en-gb/outlet-bikes/road-bikes/?prefn1=pc_rahmengroesse&prefv1=L&srule=sort_price_ascending",
     "Francja": "https://www.canyon.com/fr-fr/promo-velos/?prefn1=pc_familie&prefn2=pc_rahmengroesse&prefv1=Endurace%7CEndurace%3AON%7CAeroad%7CUltimate%7CSpeedmax%7CInflite&prefv2=L&searchType=bikes&srule=sort_price_ascending",
+    "Włochy": "https://www.canyon.com/it-it/bici-outlet/bici-da-corsa/?prefn1=pc_rahmengroesse&prefv1=L&srule=sort_price_ascending",
+    "Hiszpania": "https://www.canyon.com/es-es/bicicletas-outlet/carretera/?prefn1=pc_rahmengroesse&prefv1=L&srule=sort_price_ascending",
 }
 
 TARGET_MODELS = ["cf 7", "cf 8"]
