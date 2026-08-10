@@ -2,8 +2,8 @@ name: Canyon Checker
 
 on:
   schedule:
-    - cron: '0 */3 * * *'  # Uruchamia automatycznie co 3 godziny
-  workflow_dispatch:        # Manualne uruchamianie
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
 
 jobs:
   run-script:
@@ -16,15 +16,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
-
-      - name: Cache Canyon State
-        uses: actions/cache@v4
-        with:
-          path: canyon_state.json
-          key: canyon-state-${{ github.run_id }}
-          restore-keys: |
-            canyon-state-
 
       - name: Install dependencies
         run: |
