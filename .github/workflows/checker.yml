@@ -2,7 +2,7 @@ name: Canyon Checker
 
 on:
   schedule:
-    - cron: '0 */3 * * *'
+    - cron: '0 6-21/3 * * 1-6'
   workflow_dispatch:
 
 jobs:
