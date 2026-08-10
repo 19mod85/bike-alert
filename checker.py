@@ -59,7 +59,6 @@ def save_state(state):
 
 
 async def accept_cookies(page):
-    """Próbuje zamknąć baner cookies w różnych wersjach językowych."""
     cookie_selectors = [
         "button[data-cookieconsent='accept']",
         ".cookie-banner__button--accept",
@@ -67,6 +66,7 @@ async def accept_cookies(page):
         "button:has-text('Akceptuj')",
         "button:has-text('Alle akzeptieren')",
         "#js-cookie-banner-accept",
+        "button.wt-cookie-consent-accept"
     ]
     for selector in cookie_selectors:
         try:
@@ -83,44 +83,57 @@ async def collect_bikes(page, country, url):
     found = []
     try:
         print(f"Sprawdzam kraj: {country}...")
-        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        response = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
         
-        # Obsługa ciasteczek
+        if response and response.status >= 400:
+            print(f"Ostrzeżenie: Serwer zwrócił kod błędu {response.status} dla {country}")
+
         await accept_cookies(page)
         
-        # Przewijanie strony, aby wymusić lazy loading
-        for _ in range(3):
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(1500)
+        # Symulacja naturalnego ruchu i lazy loading
+        for _ in range(4):
+            await page.evaluate("window.scrollBy(0, document.body.scrollHeight / 3)")
+            await page.wait_for_timeout(1000)
 
+        # Rozbudowana lista selektorów kart produktów (uwzględniająca najnowsze zmiany w szablonach)
         product_selectors = [
             ".productGrid__item",
             ".product-tile",
             "div.grid-product",
-            "li.product-grid__item"
+            "li.product-grid__item",
+            "div[class*='productGrid']",
+            "div[class*='product-tile']",
+            "article.product"
         ]
         
         cards = []
         for sel in product_selectors:
             cards = await page.locator(sel).all()
             if cards:
+                print(f"Użyto selektora: {sel}")
                 break
                 
+        # Awaryjne pobieranie – jeśli selektory zawiodły, szukamy kontenerów z linkami do rowerów
         if not cards:
-            cards = await page.locator("a.product-tile__link, a.js-product-tile-link").all()
+            print(f"Brak dopasowań selektorów dla {country}, próbuję metody awaryjnej...")
+            cards = await page.locator("a[href*='/p/'], a[href*='/rowery/'], a[href*='/fahrrad/']").all()
 
         print(f"Znaleziono elementów w kategorii {country}: {len(cards)}")
 
         for card in cards:
             try:
-                text = await card.inner_text()
+                # Sprawdzenie czy element to bezpośrednio link czy kontener
+                tag_name = await card.evaluate("el => el.tagName.toLowerCase()")
                 
-                # Wyciąganie linku do produktu
-                link_elem = card.locator("a").first
-                href = await link_elem.get_attribute("href") if await link_elem.count() > 0 else None
-                
-                if not href and await card.evaluate("el => el.tagName.toLowerCase()") == "a":
+                if tag_name == "a":
                     href = await card.get_attribute("href")
+                    text = await card.inner_text()
+                else:
+                    link_elem = card.locator("a").first
+                    if await link_elem.count() == 0:
+                        continue
+                    href = await link_elem.get_attribute("href")
+                    text = await card.inner_text()
 
                 if not href:
                     continue
@@ -130,7 +143,6 @@ async def collect_bikes(page, country, url):
 
                 text_lower = text.lower()
 
-                # Sprawdzenie dopasowania modeli oraz słów kluczowych
                 model_matched = any(model in text_lower for model in TARGET_MODELS)
                 keyword_matched = any(kw in text_lower for kw in REQUIRED_KEYWORDS)
 
@@ -138,7 +150,6 @@ async def collect_bikes(page, country, url):
                     lines = [l.strip() for l in text.split("\n") if l.strip()]
                     title = lines[0] if lines else f"Canyon {country}"
                     
-                    # Próba wyciągnięcia ceny
                     price = "Brak ceny"
                     price_selectors = [
                         ".product-tile__price", 
@@ -155,18 +166,19 @@ async def collect_bikes(page, country, url):
                                 price = p_text.strip().replace("\n", " ")
                                 break
                     
-                    # Awaryjne wyciąganie ceny przez Regex, jeśli selektory zawiodły
                     if price == "Brak ceny":
                         price_match = re.search(r'([\d\s,\.]+\s*(?:zł|PLN|€|EUR|£|GBP))', text, re.IGNORECASE)
                         if price_match:
                             price = price_match.group(1).strip()
 
-                    found.append({
-                        "country": country,
-                        "title": title,
-                        "price": price,
-                        "url": href,
-                    })
+                    # Unikanie duplikatów w obrębie jednej iteracji kraju
+                    if not any(b["url"] == href for b in found):
+                        found.append({
+                            "country": country,
+                            "title": title,
+                            "price": price,
+                            "url": href,
+                        })
             except Exception:
                 continue
 
@@ -181,10 +193,21 @@ async def main():
     seen_bikes = set(state.get("seen_bikes", []))
     
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        # Dodanie argumentów maskujących przeglądarkę przed wykryciem bota
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-infobars",
+                "--window-size=1280,800"
+            ]
+        )
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800}
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 800},
+            locale="pl-PL"
         )
         page = await context.new_page()
 
@@ -203,7 +226,7 @@ async def main():
                     message = f"Model: {bike['title']}\nCena: {bike['price']}\nKraj: {bike['country']}"
                     send_ntfy_notification(title, message, bike["url"])
             
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
 
         await browser.close()
         
