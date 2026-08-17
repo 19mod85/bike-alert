@@ -143,7 +143,7 @@ async def collect_bikes(page, country, url):
         products = await page.evaluate("""() => {
             const items = [];
             const selectors = [
-                '[class=productTileDefault__productSummary] a'
+                '[class=productGrid__relativeContainer] [class=productTileDefault__productSummary] a'
             ];
             let cards = [];
             for (const sel of selectors) {
