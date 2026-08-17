@@ -23,8 +23,8 @@ COUNTRIES = {
     "Niemcy": f"https://www.canyon.com/de-de/fahrrad-outlet/{CANYON_FILTERS}",
     "Wielka Brytania": f"https://www.canyon.com/en-gb/outlet-bikes/road-bikes/{CANYON_FILTERS}",
     "Francja": f"https://www.canyon.com/fr-fr/promo-velos/{CANYON_FILTERS}",
-    "Włochy": f"https://www.canyon.com/it-it/bici-outlet/bici-da-corsa/{CANYON_FILTERS}",
-    "Hiszpania": f"https://www.canyon.com/es-es/bicicletas-outlet/carretera/{CANYON_FILTERS}",
+    "Włochy": f"https://www.canyon.com/it-it/outlet-biciclette/bici-da-corsa/{CANYON_FILTERS}",
+    "Hiszpania": f"https://www.canyon.com/es-es/outlet-bicicletas/carretera/{CANYON_FILTERS}",
 }
 STATE_FILE = Path("canyon_state.json")
 
@@ -143,9 +143,7 @@ async def collect_bikes(page, country, url):
         products = await page.evaluate("""() => {
             const items = [];
             const selectors = [
-                '.productGrid__item', '.product-tile', 'div.grid-product',
-                'li.product-grid__item', 'div[class*="productGrid"]',
-                'div[class*="product-tile"]', 'article.product'
+                '[class=productTileDefault__productSummary] a'
             ];
             let cards = [];
             for (const sel of selectors) {
@@ -232,8 +230,6 @@ async def main():
     print("=" * 80)
     print("CANYON BIKE ALERT")
     print("Canyon URL filter: Endurace only")
-    print("Python model filter: DISABLED")
-    print("Python DI2 filter: DISABLED")
     print(f"Existing state IDs: {len(seen)}")
     print("=" * 80)
 
