@@ -5,72 +5,99 @@ import os
 import re
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
+
 import requests
 from playwright.async_api import async_playwright
 
-# Konfiguracja
-GERMAN_FILTERS = "?prefn1=pc_familie&prefn2=pc_rahmengroesse&prefv1=Endurace%7CEndurace%3AON%7CAeroad%7CUltimate%7CSpeedmax%7CInflite&prefv2=L&searchType=bikes&srule=sort_price_ascending"
+CANYON_FILTERS = (
+    "?prefn1=pc_familie"
+    "&prefv1=Endurace"
+    "&prefn2=pc_rahmengroesse"
+    "&prefv2=L"
+    "&searchType=bikes"
+    "&srule=sort_price_ascending"
+)
 
 COUNTRIES = {
-    "Polska": f"https://www.canyon.com/pl-pl/rowery-wyprzedaz/{GERMAN_FILTERS}",
-    "Niemcy": f"https://www.canyon.com/de-de/fahrrad-outlet/{GERMAN_FILTERS}",
-    "Wielka Brytania": f"https://www.canyon.com/en-gb/outlet-bikes/road-bikes/{GERMAN_FILTERS}",
-    "Francja": f"https://www.canyon.com/fr-fr/promo-velos/{GERMAN_FILTERS}",
-    "Włochy": f"https://www.canyon.com/it-it/bici-outlet/bici-da-corsa/{GERMAN_FILTERS}",
-    "Hiszpania": f"https://www.canyon.com/es-es/bicicletas-outlet/carretera/{GERMAN_FILTERS}",
+    "Polska": f"https://www.canyon.com/pl-pl/rowery-wyprzedaz/{CANYON_FILTERS}",
+    "Niemcy": f"https://www.canyon.com/de-de/fahrrad-outlet/{CANYON_FILTERS}",
+    "Wielka Brytania": f"https://www.canyon.com/en-gb/outlet-bikes/road-bikes/{CANYON_FILTERS}",
+    "Francja": f"https://www.canyon.com/fr-fr/promo-velos/{CANYON_FILTERS}",
+    "Włochy": f"https://www.canyon.com/it-it/bici-outlet/bici-da-corsa/{CANYON_FILTERS}",
+    "Hiszpania": f"https://www.canyon.com/es-es/bicicletas-outlet/carretera/{CANYON_FILTERS}",
 }
-
-TARGET_MODELS = ["cf 7", "cf 8"]
-REQUIRED_KEYWORDS = ["di2"]
 STATE_FILE = Path("canyon_state.json")
 
 
 def clean_url(url):
-    """Usuwa parametry śledzące i sesyjne z URL, aby stan był stabilny."""
     parsed = urlparse(url)
-    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
 
 
 def send_ntfy_notification(title, message, click_url):
     topic = os.environ.get("NTFY_TOPIC")
     if not topic:
-        print(f"[ALERT] {title}\n{message}\nLink: {click_url}\n")
-        return
+        print("[NTFY] NTFY_TOPIC missing; notification would be:")
+        print(f"[NTFY] {title} | {click_url}")
+        return True
+
+    endpoint = f"https://ntfy.sh/{topic}"
+    print(f"[NTFY] Sending: {title}")
+    print(f"[NTFY] Click: {click_url}")
 
     try:
-        requests.post(
-            f"https://ntfy.sh/{topic}",
+        response = requests.post(
+            endpoint,
             data=message.encode("utf-8"),
             headers={
-                "Title": title.encode("utf-8"),
+                "Title": title,
                 "Click": click_url,
                 "Priority": "high",
                 "Tags": "bicycling,shopping",
             },
             timeout=10,
         )
+        print(f"[NTFY] HTTP {response.status_code}")
+        print(f"[NTFY] Response: {response.text[:500]}")
+        if 200 <= response.status_code < 300:
+            print("[NTFY] SUCCESS")
+            return True
+        print("[NTFY] FAILURE - not marking bike as seen")
+        return False
     except Exception as e:
-        print(f"Błąd wysyłania NTFY: {e}")
+        print(f"[NTFY] ERROR {type(e).__name__}: {e}")
+        print("[NTFY] FAILURE - not marking bike as seen")
+        return False
 
 
 def load_state():
-    if STATE_FILE.exists():
-        try:
-            data = json.loads(STATE_FILE.read_text())
-            if isinstance(data, list):
-                return {"seen_bikes": data}
-            return data
-        except Exception:
-            return {"seen_bikes": []}
-    return {"seen_bikes": []}
+    if not STATE_FILE.exists():
+        print("[STATE] File does not exist; starting empty.")
+        return {"seen_bikes": []}
+    try:
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            data = {"seen_bikes": data}
+        seen = data.get("seen_bikes", [])
+        if not isinstance(seen, list):
+            raise ValueError("seen_bikes is not a list")
+        print(f"[STATE] Loaded {len(seen)} IDs")
+        return {"seen_bikes": seen}
+    except Exception as e:
+        print(f"[STATE] ERROR loading state: {type(e).__name__}: {e}")
+        return {"seen_bikes": []}
 
 
 def save_state(state):
-    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+    STATE_FILE.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(f"[STATE] Saved {len(state['seen_bikes'])} IDs")
 
 
 async def accept_cookies(page):
-    cookie_selectors = [
+    selectors = [
         "button[data-cookieconsent='accept']",
         ".cookie-banner__button--accept",
         "button:has-text('Accept')",
@@ -79,129 +106,139 @@ async def accept_cookies(page):
         "button:has-text('Accetta')",
         "button:has-text('Aceptar')",
         "#js-cookie-banner-accept",
-        "button.wt-cookie-consent-accept"
+        "button.wt-cookie-consent-accept",
     ]
-    for selector in cookie_selectors:
+    for selector in selectors:
         try:
             btn = page.locator(selector).first
             if await btn.is_visible(timeout=2000):
                 await btn.click()
                 await page.wait_for_timeout(1000)
+                print(f"[COOKIES] Accepted using {selector}")
                 break
         except Exception:
-            continue
+            pass
 
 
 async def collect_bikes(page, country, url):
     found = []
+    print("\n" + "=" * 80)
+    print(f"[{country}] START")
+    print(f"[{country}] URL: {url}")
+    print("=" * 80)
+
     try:
-        print(f"Sprawdzam kraj: {country}...")
         response = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        
-        if response and response.status >= 400:
-            print(f"Ostrzeżenie: Serwer zwrócił kod błędu {response.status} dla {country}")
-
+        if response:
+            print(f"[{country}] HTTP status: {response.status}")
         await accept_cookies(page)
-        
-        # Symulacja ruchu i lazy loading
-        for _ in range(4):
-            await page.evaluate("window.scrollBy(0, document.body.scrollHeight / 3)")
-            await page.wait_for_timeout(1000)
 
-        # Pobieranie wszystkich danych produktów za pomocą bezpiecznego kodu JS w przeglądarce
-        products_data = await page.evaluate("""() => {
+        for i in range(4):
+            await page.evaluate(
+                "window.scrollBy(0, document.body.scrollHeight / 3)"
+            )
+            await page.wait_for_timeout(1000)
+            print(f"[{country}] Scroll {i + 1}/4")
+
+        products = await page.evaluate("""() => {
             const items = [];
             const selectors = [
-                '.productGrid__item',
-                '.product-tile',
-                'div.grid-product',
-                'li.product-grid__item',
-                'div[class*="productGrid"]',
-                'div[class*="product-tile"]',
-                'article.product'
+                '.productGrid__item', '.product-tile', 'div.grid-product',
+                'li.product-grid__item', 'div[class*="productGrid"]',
+                'div[class*="product-tile"]', 'article.product'
             ];
-            
             let cards = [];
             for (const sel of selectors) {
                 cards = document.querySelectorAll(sel);
-                if (cards.length > 0) break;
+                if (cards.length) break;
             }
-            
-            if (cards.length === 0) {
-                cards = document.querySelectorAll("a[href*='/p/'], a[href*='/rowery/'], a[href*='/fahrrad/'], a[href*='/bici/'], a[href*='/bicicletas/']");
+            if (!cards.length) {
+                cards = document.querySelectorAll(
+                    "a[href*='/p/'], a[href*='/rowery/'], " +
+                    "a[href*='/fahrrad/'], a[href*='/bici/'], " +
+                    "a[href*='/bicicletas/']"
+                );
             }
-            
             cards.forEach(card => {
-                let link = card.tagName.toLowerCase() === 'a' ? card : card.querySelector('a');
-                let href = link ? link.getAttribute('href') : null;
-                let text = card.innerText || '';
-                
-                let priceEl = card.querySelector('.product-tile__price, .price, .price__regular, .product-price, span[class*="price"]');
-                let priceText = priceEl ? priceEl.innerText : '';
-                
-                if (href) {
-                    items.push({ href, text, priceText });
-                }
+                const link = card.tagName.toLowerCase() === 'a'
+                    ? card : card.querySelector('a');
+                const href = link ? link.getAttribute('href') : null;
+                const text = card.innerText || '';
+                const priceEl = card.querySelector(
+                    '.product-tile__price, .price, .price__regular, ' +
+                    '.product-price, span[class*="price"]'
+                );
+                const priceText = priceEl ? priceEl.innerText : '';
+                if (href) items.push({href, text, priceText});
             });
-            
             return items;
         }""")
 
-        print(f"Znaleziono elementów w kategorii {country}: {len(products_data)}")
+        print(f"[{country}] Cards found: {len(products)}")
 
-        for item in products_data:
+        for n, item in enumerate(products, 1):
             try:
-                href = item["href"]
-                text = item["text"]
-                price_text = item["priceText"]
-
+                href = item.get("href")
+                text = item.get("text", "")
+                price_text = item.get("priceText", "")
                 if not href:
+                    print(f"[{country}] Card {n}: no href")
                     continue
-                    
                 if href.startswith("/"):
-                    href = f"https://www.canyon.com{href}"
+                    href = "https://www.canyon.com" + href
                 elif not href.startswith("http"):
+                    print(f"[{country}] Card {n}: unsupported href")
                     continue
 
-                # Czyszczenie URL w celu eliminacji parametrów śledzących
                 href = clean_url(href)
-                text_lower = text.lower()
+                lines = [x.strip() for x in text.split("\n") if x.strip()]
+                title = lines[0] if lines else f"Canyon {country}"
 
-                model_matched = any(model in text_lower for model in TARGET_MODELS)
-                keyword_matched = any(kw in text_lower for kw in REQUIRED_KEYWORDS)
+                price = price_text.strip().replace("\n", " ") if price_text.strip() else "Brak ceny"
+                if price == "Brak ceny":
+                    m = re.search(
+                        r"([\d\s,\.]+\s*(?:zł|PLN|€|EUR|£|GBP))",
+                        text, re.I
+                    )
+                    if m:
+                        price = m.group(1).strip()
 
-                if model_matched and keyword_matched:
-                    lines = [l.strip() for l in text.split("\n") if l.strip()]
-                    title = lines[0] if lines else f"Canyon {country}"
-                    
-                    price = "Brak ceny"
-                    if price_text.strip():
-                        price = price_text.strip().replace("\n", " ")
-                    else:
-                        price_match = re.search(r'([\d\s,\.]+\s*(?:zł|PLN|€|EUR|£|GBP))', text, re.IGNORECASE)
-                        if price_match:
-                            price = price_match.group(1).strip()
+                if any(x["url"] == href for x in found):
+                    print(f"[{country}] Card {n}: duplicate")
+                    continue
 
-                    if not any(b["url"] == href for b in found):
-                        found.append({
-                            "country": country,
-                            "title": title,
-                            "price": price,
-                            "url": href,
-                        })
-            except Exception:
-                continue
+                found.append({
+                    "country": country,
+                    "title": title,
+                    "price": price,
+                    "url": href,
+                })
+                print(f"[{country}] Candidate: {title} | {price} | {href}")
+
+            except Exception as e:
+                print(f"[{country}] Card {n}: ERROR {type(e).__name__}: {e}")
 
     except Exception as e:
-        print(f"Błąd podczas pobierania {country}: {e}")
-        
+        print(f"[{country}] COLLECTION ERROR {type(e).__name__}: {e}")
+
+    print(f"[{country}] Unique candidates: {len(found)}")
     return found
 
 
 async def main():
     state = load_state()
-    seen_bikes = set(state.get("seen_bikes", []))
-    
+    seen = set(state.get("seen_bikes", []))
+
+    print("=" * 80)
+    print("CANYON BIKE ALERT")
+    print("Canyon URL filter: Endurace only")
+    print("Python model filter: DISABLED")
+    print("Python DI2 filter: DISABLED")
+    print(f"Existing state IDs: {len(seen)}")
+    print("=" * 80)
+
+    total = new = already_seen = sent = failed = 0
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -210,39 +247,81 @@ async def main():
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-infobars",
-                "--window-size=1280,800"
-            ]
+                "--window-size=1280,800",
+            ],
         )
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/123.0.0.0 Safari/537.36"
+            ),
             viewport={"width": 1280, "height": 800},
-            locale="pl-PL"
+            locale="pl-PL",
         )
         page = await context.new_page()
 
-        all_new_bikes = []
+        try:
+            for country, url in COUNTRIES.items():
+                bikes = await collect_bikes(page, country, url)
+                total += len(bikes)
 
-        for country, url in COUNTRIES.items():
-            bikes = await collect_bikes(page, country, url)
-            for bike in bikes:
-                bike_id = hashlib.md5(bike["url"].encode()).hexdigest()
-                
-                if bike_id not in seen_bikes:
-                    seen_bikes.add(bike_id)
-                    all_new_bikes.append(bike)
-                    
-                    title = f"Rowerowa okazja! ({bike['country']})"
-                    message = f"Model: {bike['title']}\nCena: {bike['price']}\nKraj: {bike['country']}"
-                    send_ntfy_notification(title, message, bike["url"])
-            
-            await asyncio.sleep(3)
+                print(f"[{country}] Processing {len(bikes)} candidates")
 
-        await browser.close()
-        
-        state["seen_bikes"] = list(seen_bikes)
-        save_state(state)
-        
-        print(f"Zakończono. Znaleziono nowych okazji: {len(all_new_bikes)}")
+                for i, bike in enumerate(bikes, 1):
+                    bike_id = hashlib.md5(
+                        bike["url"].encode("utf-8")
+                    ).hexdigest()
+
+                    print(f"[{country}] Candidate {i}/{len(bikes)}")
+                    print(f"[{country}]   title={bike['title']}")
+                    print(f"[{country}]   price={bike['price']}")
+                    print(f"[{country}]   url={bike['url']}")
+                    print(f"[{country}]   id={bike_id}")
+
+                    if bike_id in seen:
+                        already_seen += 1
+                        print(f"[{country}]   STATUS=SEEN")
+                        continue
+
+                    new += 1
+                    print(f"[{country}]   STATUS=NEW")
+
+                    title = (
+                        f"Canyon Endurace - {bike['country']} - {bike['title']}"
+                    )
+                    message = (
+                        f"Model: {bike['title']}\n"
+                        f"Cena: {bike['price']}\n"
+                        f"Kraj: {bike['country']}\n"
+                        f"URL: {bike['url']}"
+                    )
+
+                    if send_ntfy_notification(title, message, bike["url"]):
+                        seen.add(bike_id)
+                        sent += 1
+                        print(f"[{country}]   STATE=MARKED_SEEN")
+                    else:
+                        failed += 1
+                        print(f"[{country}]   STATE=NOT_MARKED")
+
+                await asyncio.sleep(3)
+        finally:
+            await browser.close()
+
+    state["seen_bikes"] = sorted(seen)
+    save_state(state)
+
+    print("=" * 80)
+    print("FINAL SUMMARY")
+    print(f"Candidates found: {total}")
+    print(f"Already seen: {already_seen}")
+    print(f"New candidates: {new}")
+    print(f"Notifications successful: {sent}")
+    print(f"Notifications failed: {failed}")
+    print(f"State IDs saved: {len(seen)}")
+    print("=" * 80)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
